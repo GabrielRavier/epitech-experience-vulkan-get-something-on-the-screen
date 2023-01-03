@@ -1,4 +1,5 @@
 // Needed to get GLFW to work alongside Vulkan
+#include <vulkan/vulkan_core.h>
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
@@ -94,489 +95,516 @@ class vulkanSomethingOnTheScreenApp {
     std::array<VkSemaphore, vulkanSomethingOnTheScreenApp::maxFramesInFlight> vulkanRenderFinishedSemaphores;
     std::array<VkFence, vulkanSomethingOnTheScreenApp::maxFramesInFlight> vulkanInFlightFences;
 
+    // Part of the extra code for handling resizes explicitly on platforms that don't trigger VK_ERROR_OUT_OF_DATE_KHR
+    bool framebufferResized = false;
+
     std::uint32_t currentFrame = 0;
     
 public:
     vulkanSomethingOnTheScreenApp()
     {
-        // Initialize GLFW-related stuff
+        this->initializeGlfw();
+        this->initializeVulkan();
+    }
+
+    void initializeGlfw()
+    {
+        glfwInit();
+
+        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // Needed to avoid GLFW creating an OpenGL context
+
+        this->glfwWindow = glfwCreateWindow(this->windowWidth, this->windowHeight, this->name, nullptr, nullptr);
+        glfwSetWindowUserPointer(this->glfwWindow, this);
+        glfwSetFramebufferSizeCallback(this->glfwWindow, vulkanSomethingOnTheScreenApp::framebufferResizeCallback);
+    }
+
+    static void framebufferResizeCallback(GLFWwindow *window, int width, int height)
+    {
+        auto self = reinterpret_cast<vulkanSomethingOnTheScreenApp *>(glfwGetWindowUserPointer(window));
+        self->framebufferResized = true;
+    }
+
+    void initializeVulkan()
+    {
+        this->initializeVulkanInstance();
+        this->initializeDebugMessenger();
+        this->initializeSurface();
+        this->initializePhysicalDevice();
+        this->initializeLogicalDevice();
+        this->initializeSwapChain();
+        this->initializeSwapChainImageViews();
+        this->initializeRenderPass();
+        this->initializeGraphicsPipeline();
+        this->initializeFramebuffers();
+        this->initializeCommandPool();
+        this->initializeCommandBuffers();
+        this->initializeSyncObjects();
+    }
+
+    void initializeVulkanInstance()
+    {
+        if (!this->areVulkanValidationLayersSupported())
+            throw std::runtime_error("Wanted Vulkan validation layers, but they were not available !");
+
+        VkApplicationInfo appInfo = {};
+        appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+                
+        appInfo.pApplicationName = this->name;
+        appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
+        appInfo.pEngineName = "Does not use an engine";
+        appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
+        appInfo.apiVersion = VK_API_VERSION_1_0;
+
+        VkInstanceCreateInfo createInfo = {};
+        createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+                
+        createInfo.pApplicationInfo = &appInfo;
+
+        // For diagnostics purposes
         {
-            glfwInit();
+            std::uint32_t extensionCount = 0;
+            vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, nullptr);
 
-            glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // Needed to avoid GLFW creating an OpenGL context
-            glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE); // Handling resizing is complicated with Vulkan so don't do it
+            std::vector<VkExtensionProperties> extensions;
+            extensions.resize(extensionCount);
 
-            this->glfwWindow = glfwCreateWindow(this->windowWidth, this->windowHeight, this->name, nullptr, nullptr);
+            vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, extensions.data());
+
+            std::cout << "Available Vulkan extensions:\n";
+            for (const auto &extension : extensions)
+                std::cout << '\t' << extension.extensionName << '\n';
         }
 
-        // Initialize Vulkan-related stuff
-        {
-            // Initialize Vulkan instance
-            {
-                if (!this->areVulkanValidationLayersSupported())
-                    throw std::runtime_error("Wanted Vulkan validation layers, but they were not available !");
+        auto requiredExtensions = this->getRequiredVulkanExtensions();
+        createInfo.enabledExtensionCount = static_cast<std::uint32_t>(requiredExtensions.size());
+        createInfo.ppEnabledExtensionNames = requiredExtensions.data();
 
-                VkApplicationInfo appInfo = {};
-                appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-                
-                appInfo.pApplicationName = this->name;
-                appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
-                appInfo.pEngineName = "Does not use an engine";
-                appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-                appInfo.apiVersion = VK_API_VERSION_1_0;
+        createInfo.enabledLayerCount = static_cast<std::uint32_t>(this->validationLayers.size());
+        createInfo.ppEnabledLayerNames = this->validationLayers.data();
 
-                VkInstanceCreateInfo createInfo = {};
-                createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-                
-                createInfo.pApplicationInfo = &appInfo;
+        // We also want to be able to debug issues in vkCreateInstance, if any
+        auto debugMessengerCreateInfo = this->makeDebugMessengerCreateInfo();
+        createInfo.pNext = &debugMessengerCreateInfo;
 
-                // For diagnostics purposes
-                {
-                    std::uint32_t extensionCount = 0;
-                    vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, nullptr);
+        if (vkCreateInstance(&createInfo, nullptr, &this->vulkanInstance) != VK_SUCCESS)
+            throw std::runtime_error("Failed to create Vulkan instance");
+    }
+    
+    void initializeDebugMessenger()   
+    {
+        auto createInfo = this->makeDebugMessengerCreateInfo();
+        if (internalVkCreateDebugUtilsMessengerEXT(this->vulkanInstance, &createInfo, nullptr, &this->vulkanDebugMessenger) != VK_SUCCESS)
+            throw std::runtime_error("Failed to set up Vulkan debug messenger");
+    }
+    
+    void initializeSurface()   
+    {
+        if (glfwCreateWindowSurface(this->vulkanInstance, this->glfwWindow, nullptr, &this->vulkanSurface) != VK_SUCCESS)
+            throw std::runtime_error("Failed to create window surface");
+    }
 
-                    std::vector<VkExtensionProperties> extensions;
-                    extensions.resize(extensionCount);
+    void initializePhysicalDevice()
+    {
+        std::uint32_t physicalDeviceCount = 0;
+        vkEnumeratePhysicalDevices(this->vulkanInstance, &physicalDeviceCount, nullptr);
 
-                    vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, extensions.data());
+        // No point in going further if no GPUs have Vulkan suport
+        if (physicalDeviceCount == 0)
+            throw std::runtime_error("Failed to find a GPU with Vulkan support");
 
-                    std::cout << "Available Vulkan extensions:\n";
-                    for (const auto &extension : extensions)
-                        std::cout << '\t' << extension.extensionName << '\n';
-                }
+        std::vector<VkPhysicalDevice> physicalDevices;
+        physicalDevices.resize(physicalDeviceCount);
+        vkEnumeratePhysicalDevices(this->vulkanInstance, &physicalDeviceCount, physicalDevices.data());
 
-                auto requiredExtensions = this->getRequiredVulkanExtensions();
-                createInfo.enabledExtensionCount = static_cast<std::uint32_t>(requiredExtensions.size());
-                createInfo.ppEnabledExtensionNames = requiredExtensions.data();
-
-                createInfo.enabledLayerCount = static_cast<std::uint32_t>(this->validationLayers.size());
-                createInfo.ppEnabledLayerNames = this->validationLayers.data();
-
-                // We also want to be able to debug issues in vkCreateInstance, if any
-                auto debugMessengerCreateInfo = this->makeDebugMessengerCreateInfo();
-                createInfo.pNext = &debugMessengerCreateInfo;
-
-                if (vkCreateInstance(&createInfo, nullptr, &this->vulkanInstance) != VK_SUCCESS)
-                    throw std::runtime_error("Failed to create Vulkan instance");
+        for (const auto &physicalDevice : physicalDevices)
+            if (this->isVulkanPhysicalDeviceSuitableForUs(physicalDevice)) {
+                this->vulkanPhysicalDevice = physicalDevice;
+                break;
             }
 
-            // Setup debug messenger
+        if (this->vulkanPhysicalDevice == VK_NULL_HANDLE)
+            throw std::runtime_error("Failed to find a GPU with Vulkan support that is suitable for us");
+    }
+
+    void initializeLogicalDevice()
+    {
+        auto familyIndices = this->findVulkanQueueFamilies(this->vulkanPhysicalDevice);
+
+        std::vector<VkDeviceQueueCreateInfo> deviceQueueCreateInfos;
+        std::unordered_set<std::uint32_t> uniqueQueueFamilyIndices = {
+            familyIndices.graphicsFamily.value(),
+            familyIndices.presentFamily.value(),
+        };
+
+        float queuePriority = 1.f;
+        for (auto queueFamilyIndex : uniqueQueueFamilyIndices) {
+            VkDeviceQueueCreateInfo deviceQueueCreateInfo = {};
+            deviceQueueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+
+            deviceQueueCreateInfo.queueFamilyIndex = queueFamilyIndex;
+            deviceQueueCreateInfo.queueCount = 1;
+            deviceQueueCreateInfo.pQueuePriorities = &queuePriority;
+            deviceQueueCreateInfos.push_back(deviceQueueCreateInfo);
+        }
+
+        VkPhysicalDeviceFeatures physicalDeviceFeatures = {};
+
+        VkDeviceCreateInfo deviceCreateInfo = {};
+        deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+
+        deviceCreateInfo.queueCreateInfoCount = static_cast<std::uint32_t>(deviceQueueCreateInfos.size());
+        deviceCreateInfo.pQueueCreateInfos = deviceQueueCreateInfos.data();
+        deviceCreateInfo.pEnabledFeatures = &physicalDeviceFeatures;
+
+        // Using swapchains requires us to enable the VK_KHR_swapchain extension here
+        deviceCreateInfo.enabledExtensionCount = static_cast<std::uint32_t>(this->requiredVulkanDeviceExtensions.size());
+        deviceCreateInfo.ppEnabledExtensionNames = this->requiredVulkanDeviceExtensions.data();
+
+        deviceCreateInfo.enabledLayerCount = static_cast<std::uint32_t>(this->validationLayers.size());
+        deviceCreateInfo.ppEnabledLayerNames = this->validationLayers.data();
+
+        if (vkCreateDevice(this->vulkanPhysicalDevice, &deviceCreateInfo, nullptr, &this->vulkanDevice) != VK_SUCCESS)
+            throw std::runtime_error("Failed to create logical device");
+
+        vkGetDeviceQueue(this->vulkanDevice, familyIndices.graphicsFamily.value(), 0, &this->vulkanGraphicsQueue);
+        vkGetDeviceQueue(this->vulkanDevice, familyIndices.presentFamily.value(), 0, &this->vulkanPresentQueue);
+    }
+
+    void initializeSwapChain()
+    {
+        auto swapChainSupport = this->queryVulkanSwapChainSupport(this->vulkanPhysicalDevice);
+        auto surfaceFormat = this->chooseVulkanSwapSurfaceFormat(swapChainSupport.surfaceFormats);
+        auto presentMode = this->chooseVulkanSwapPresentMode(swapChainSupport.presentModes);
+        auto extent = this->chooseVulkanSwapExtent(swapChainSupport.capabilities);
+
+        // Sticking to the required minimum image count might mean we'd have to wait on the driver to complete internal operations before it could acquire other images to render, so it's recommended to request at least one more image than the minimum (while making sure that doesn't exceed the maximum either (note: maxImageCount == 0 means there is no maximum))
+        std::uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1;
+        if (swapChainSupport.capabilities.maxImageCount != 0)
+            imageCount = std::min(imageCount, swapChainSupport.capabilities.maxImageCount);
+
+        VkSwapchainCreateInfoKHR createInfo = {};
+        createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+
+        createInfo.surface = this->vulkanSurface;
+
+        createInfo.minImageCount = imageCount;
+        createInfo.imageFormat = surfaceFormat.format;
+        createInfo.imageColorSpace = surfaceFormat.colorSpace;
+        createInfo.imageExtent = extent;
+        createInfo.imageArrayLayers = 1; // We're not developing a stereoscopic 3D application lol
+        createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+
+        // VK_SHARING_MODE_EXCLUSIVE has the best performance, so use it when possible (i.e. when we have the same graphics and presenting family indices). Apparently it's also possible to do otherwise but I'm not gonna try to do EVEN MORE stuff just to handle that
+        auto familyIndices = this->findVulkanQueueFamilies(this->vulkanPhysicalDevice);
+        std::array<std::uint32_t, 2> queueFamilyIndices = {
             {
-                auto createInfo = this->makeDebugMessengerCreateInfo();
-                if (internalVkCreateDebugUtilsMessengerEXT(this->vulkanInstance, &createInfo, nullptr, &this->vulkanDebugMessenger) != VK_SUCCESS)
-                    throw std::runtime_error("Failed to set up Vulkan debug messenger");
+                familyIndices.graphicsFamily.value(),
+                familyIndices.presentFamily.value(),
             }
+        };
 
-            // Create a surface
-            {
-                if (glfwCreateWindowSurface(this->vulkanInstance, this->glfwWindow, nullptr, &this->vulkanSurface) != VK_SUCCESS)
-                    throw std::runtime_error("Failed to create window surface");
-            }
+        if (familyIndices.graphicsFamily.value() != familyIndices.presentFamily.value()) {
+            createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+            createInfo.queueFamilyIndexCount = 2;
+            createInfo.pQueueFamilyIndices = queueFamilyIndices.data();
+        } else {
+            createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            createInfo.queueFamilyIndexCount = 0;
+            createInfo.pQueueFamilyIndices = nullptr;
+        }
 
-            // Pick a physical device
-            {
-                std::uint32_t physicalDeviceCount = 0;
-                vkEnumeratePhysicalDevices(this->vulkanInstance, &physicalDeviceCount, nullptr);
+        // We need to do this to make sure there's no pre-transform at all
+        createInfo.preTransform = swapChainSupport.capabilities.currentTransform;
 
-                // No point in going further if no GPUs have Vulkan suport
-                if (physicalDeviceCount == 0)
-                    throw std::runtime_error("Failed to find a GPU with Vulkan support");
+        // We're very likely to want to ignore the alpha channel
+        createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
 
-                std::vector<VkPhysicalDevice> physicalDevices;
-                physicalDevices.resize(physicalDeviceCount);
-                vkEnumeratePhysicalDevices(this->vulkanInstance, &physicalDeviceCount, physicalDevices.data());
+        createInfo.presentMode = presentMode;
+        createInfo.clipped = VK_TRUE; // We don't want to read back pixels that were obscured or anything like that, so allowing clipping is fine
 
-                for (const auto &physicalDevice : physicalDevices)
-                    if (this->isVulkanPhysicalDeviceSuitableForUs(physicalDevice)) {
-                        this->vulkanPhysicalDevice = physicalDevice;
-                        break;
-                    }
+        // We assume we'll only ever create one swap chain because handling it is otherwise a complete mess (this is also why we don't support stuff like resizing btw, and yes that'd require making a new swap chain lol)
+        createInfo.oldSwapchain = VK_NULL_HANDLE;
 
-                if (this->vulkanPhysicalDevice == VK_NULL_HANDLE)
-                    throw std::runtime_error("Failed to find a GPU with Vulkan support that is suitable for us");
-            }
+        if (vkCreateSwapchainKHR(this->vulkanDevice, &createInfo, nullptr, &this->vulkanSwapChain) != VK_SUCCESS)
+            throw std::runtime_error("Failed to create swap chain");
 
-            // Create a logical device
-            {
-                auto familyIndices = this->findVulkanQueueFamilies(this->vulkanPhysicalDevice);
+        vkGetSwapchainImagesKHR(this->vulkanDevice, this->vulkanSwapChain, &imageCount, nullptr);
+        this->vulkanSwapChainImages.resize(imageCount);
+        vkGetSwapchainImagesKHR(this->vulkanDevice, this->vulkanSwapChain, &imageCount, this->vulkanSwapChainImages.data());
 
-                std::vector<VkDeviceQueueCreateInfo> deviceQueueCreateInfos;
-                std::unordered_set<std::uint32_t> uniqueQueueFamilyIndices = {
-                    familyIndices.graphicsFamily.value(),
-                    familyIndices.presentFamily.value(),
-                };
+        // Needed for swap chain image view creation
+        this->vulkanSwapChainImageFormat = surfaceFormat.format;
+        this->vulkanSwapChainExtent = extent;
+    }
 
-                float queuePriority = 1.f;
-                for (auto queueFamilyIndex : uniqueQueueFamilyIndices) {
-                    VkDeviceQueueCreateInfo deviceQueueCreateInfo = {};
-                    deviceQueueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    void initializeSwapChainImageViews()
+    {
+        this->vulkanSwapChainImageViews.resize(this->vulkanSwapChainImages.size());
 
-                    deviceQueueCreateInfo.queueFamilyIndex = queueFamilyIndex;
-                    deviceQueueCreateInfo.queueCount = 1;
-                    deviceQueueCreateInfo.pQueuePriorities = &queuePriority;
-                    deviceQueueCreateInfos.push_back(deviceQueueCreateInfo);
-                }
-
-                VkPhysicalDeviceFeatures physicalDeviceFeatures = {};
-
-                VkDeviceCreateInfo deviceCreateInfo = {};
-                deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-
-                deviceCreateInfo.queueCreateInfoCount = static_cast<std::uint32_t>(deviceQueueCreateInfos.size());
-                deviceCreateInfo.pQueueCreateInfos = deviceQueueCreateInfos.data();
-                deviceCreateInfo.pEnabledFeatures = &physicalDeviceFeatures;
-
-                // Using swapchains requires us to enable the VK_KHR_swapchain extension here
-                deviceCreateInfo.enabledExtensionCount = static_cast<std::uint32_t>(this->requiredVulkanDeviceExtensions.size());
-                deviceCreateInfo.ppEnabledExtensionNames = this->requiredVulkanDeviceExtensions.data();
-
-                deviceCreateInfo.enabledLayerCount = static_cast<std::uint32_t>(this->validationLayers.size());
-                deviceCreateInfo.ppEnabledLayerNames = this->validationLayers.data();
-
-                if (vkCreateDevice(this->vulkanPhysicalDevice, &deviceCreateInfo, nullptr, &this->vulkanDevice) != VK_SUCCESS)
-                    throw std::runtime_error("Failed to create logical device");
-
-                vkGetDeviceQueue(this->vulkanDevice, familyIndices.graphicsFamily.value(), 0, &this->vulkanGraphicsQueue);
-                vkGetDeviceQueue(this->vulkanDevice, familyIndices.presentFamily.value(), 0, &this->vulkanPresentQueue);
-            }
-
-            // Create a swap chain
-            {
-                auto swapChainSupport = this->queryVulkanSwapChainSupport(this->vulkanPhysicalDevice);
-                auto surfaceFormat = this->chooseVulkanSwapSurfaceFormat(swapChainSupport.surfaceFormats);
-                auto presentMode = this->chooseVulkanSwapPresentMode(swapChainSupport.presentModes);
-                auto extent = this->chooseVulkanSwapExtent(swapChainSupport.capabilities);
-
-                // Sticking to the required minimum image count might mean we'd have to wait on the driver to complete internal operations before it could acquire other images to render, so it's recommended to request at least one more image than the minimum (while making sure that doesn't exceed the maximum either (note: maxImageCount == 0 means there is no maximum))
-                std::uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1;
-                if (swapChainSupport.capabilities.maxImageCount != 0)
-                    imageCount = std::min(imageCount, swapChainSupport.capabilities.maxImageCount);
-
-                VkSwapchainCreateInfoKHR createInfo = {};
-                createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-
-                createInfo.surface = this->vulkanSurface;
-
-                createInfo.minImageCount = imageCount;
-                createInfo.imageFormat = surfaceFormat.format;
-                createInfo.imageColorSpace = surfaceFormat.colorSpace;
-                createInfo.imageExtent = extent;
-                createInfo.imageArrayLayers = 1; // We're not developing a stereoscopic 3D application lol
-                createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-
-                // VK_SHARING_MODE_EXCLUSIVE has the best performance, so use it when possible (i.e. when we have the same graphics and presenting family indices). Apparently it's also possible to do otherwise but I'm not gonna try to do EVEN MORE stuff just to handle that
-                auto familyIndices = this->findVulkanQueueFamilies(this->vulkanPhysicalDevice);
-                std::array<std::uint32_t, 2> queueFamilyIndices = {
-                    {
-                        familyIndices.graphicsFamily.value(),
-                        familyIndices.presentFamily.value(),
-                    }
-                };
-
-                if (familyIndices.graphicsFamily.value() != familyIndices.presentFamily.value()) {
-                    createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
-                    createInfo.queueFamilyIndexCount = 2;
-                    createInfo.pQueueFamilyIndices = queueFamilyIndices.data();
-                } else {
-                    createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-                    createInfo.queueFamilyIndexCount = 0;
-                    createInfo.pQueueFamilyIndices = nullptr;
-                }
-
-                // We need to do this to make sure there's no pre-transform at all
-                createInfo.preTransform = swapChainSupport.capabilities.currentTransform;
-
-                // We're very likely to want to ignore the alpha channel
-                createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-
-                createInfo.presentMode = presentMode;
-                createInfo.clipped = VK_TRUE; // We don't want to read back pixels that were obscured or anything like that, so allowing clipping is fine
-
-                // We assume we'll only ever create one swap chain because handling it is otherwise a complete mess (this is also why we don't support stuff like resizing btw, and yes that'd require making a new swap chain lol)
-                createInfo.oldSwapchain = VK_NULL_HANDLE;
-
-                if (vkCreateSwapchainKHR(this->vulkanDevice, &createInfo, nullptr, &this->vulkanSwapChain) != VK_SUCCESS)
-                    throw std::runtime_error("Failed to create swap chain");
-
-                vkGetSwapchainImagesKHR(this->vulkanDevice, this->vulkanSwapChain, &imageCount, nullptr);
-                this->vulkanSwapChainImages.resize(imageCount);
-                vkGetSwapchainImagesKHR(this->vulkanDevice, this->vulkanSwapChain, &imageCount, this->vulkanSwapChainImages.data());
-
-                // Needed for swap chain image view creation
-                this->vulkanSwapChainImageFormat = surfaceFormat.format;
-                this->vulkanSwapChainExtent = extent;
-            }
-
-            // Create swap chain image views
-            {
-                this->vulkanSwapChainImageViews.resize(this->vulkanSwapChainImages.size());
-
-                for (std::size_t i = 0; i < this->vulkanSwapChainImages.size(); ++i) {
-                    VkImageViewCreateInfo createInfo = {};
-                    createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        for (std::size_t i = 0; i < this->vulkanSwapChainImages.size(); ++i) {
+            VkImageViewCreateInfo createInfo = {};
+            createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
                     
-                    createInfo.image = this->vulkanSwapChainImages.at(i);
+            createInfo.image = this->vulkanSwapChainImages.at(i);
 
-                    // We want to use a 2D texture
-                    createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-                    createInfo.format = this->vulkanSwapChainImageFormat;
+            // We want to use a 2D texture
+            createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            createInfo.format = this->vulkanSwapChainImageFormat;
 
-                    // We don't want to do any fancy stuff with the colors, so just stick with the default mappings
-                    createInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
-                    createInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
-                    createInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
-                    createInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+            // We don't want to do any fancy stuff with the colors, so just stick with the default mappings
+            createInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+            createInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+            createInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+            createInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
 
-                    // We need to specify the image's purpose and what part of the image should be accessed - we want to use them as color targets without any mipmapping or layering
-                    createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-                    createInfo.subresourceRange.baseMipLevel = 0;
-                    createInfo.subresourceRange.levelCount = 1;
-                    createInfo.subresourceRange.baseArrayLayer = 0;
-                    createInfo.subresourceRange.layerCount = 1;
+            // We need to specify the image's purpose and what part of the image should be accessed - we want to use them as color targets without any mipmapping or layering
+            createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            createInfo.subresourceRange.baseMipLevel = 0;
+            createInfo.subresourceRange.levelCount = 1;
+            createInfo.subresourceRange.baseArrayLayer = 0;
+            createInfo.subresourceRange.layerCount = 1;
 
-                    if (vkCreateImageView(this->vulkanDevice, &createInfo, nullptr, &this->vulkanSwapChainImageViews.at(i)) != VK_SUCCESS)
-                        throw std::runtime_error("Failed to create one of the image views");
-                }
-            }
-
-            // Create render pass
-            {
-                VkAttachmentDescription colorAttachmentDescription = {};
-                colorAttachmentDescription.format = this->vulkanSwapChainImageFormat;
-                colorAttachmentDescription.samples = VK_SAMPLE_COUNT_1_BIT;
-
-                colorAttachmentDescription.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-                colorAttachmentDescription.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-
-                colorAttachmentDescription.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-                colorAttachmentDescription.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-
-                colorAttachmentDescription.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-                colorAttachmentDescription.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
-                VkAttachmentReference colorAttachmentReference = {};
-                colorAttachmentReference.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-                VkSubpassDescription subpassDescription = {};
-                subpassDescription.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-
-                subpassDescription.colorAttachmentCount = 1;
-                subpassDescription.pColorAttachments = &colorAttachmentReference;
-
-                VkRenderPassCreateInfo renderPassCreateInfo = {};
-                renderPassCreateInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-                renderPassCreateInfo.attachmentCount = 1;
-                renderPassCreateInfo.pAttachments = &colorAttachmentDescription;
-                renderPassCreateInfo.subpassCount = 1;
-                renderPassCreateInfo.pSubpasses = &subpassDescription;
-
-                VkSubpassDependency subpassDependency = {};
-                subpassDependency.srcSubpass = VK_SUBPASS_EXTERNAL; // The implicit subpass before the render pass
-                subpassDependency.dstSubpass = 0; // Our pass, the first and only one
-                subpassDependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; // We need to wait for the swap chain to finish reading from the image before we can access it
-                subpassDependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; // Prevent the transition from happening until it's actually necessary (and allowed)
-                subpassDependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-
-                renderPassCreateInfo.dependencyCount = 1;
-                renderPassCreateInfo.pDependencies = &subpassDependency;
-
-                if (vkCreateRenderPass(this->vulkanDevice, &renderPassCreateInfo, nullptr, &this->vulkanRenderPass) != VK_SUCCESS)
-                    throw std::runtime_error("Failed to create render pass");
-            }
-
-            // Create graphics pipeline
-            {
-                auto vertShaderCode = readFullFile("./shaders/vert.spv");
-                auto fragShaderCode = readFullFile("./shaders/frag.spv");
-
-                auto vertShaderModule = this->createVulkanShaderModuleFromCode(vertShaderCode);
-                auto fragShaderModule = this->createVulkanShaderModuleFromCode(fragShaderCode);
-
-                VkPipelineShaderStageCreateInfo vertShaderStageCreateInfo = {};
-                vertShaderStageCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-
-                vertShaderStageCreateInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
-
-                vertShaderStageCreateInfo.module = vertShaderModule;
-                vertShaderStageCreateInfo.pName = "main";
-
-                VkPipelineShaderStageCreateInfo fragShaderStageCreateInfo = {};
-                fragShaderStageCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-
-                fragShaderStageCreateInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-
-                fragShaderStageCreateInfo.module = fragShaderModule;
-                fragShaderStageCreateInfo.pName = "main";
-
-                std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages = {
-                    {
-                        vertShaderStageCreateInfo,
-                        fragShaderStageCreateInfo,
-                    }
-                };
-
-                VkPipelineVertexInputStateCreateInfo vertexInputStateCreateInfo = {};
-                vertexInputStateCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-
-                VkPipelineInputAssemblyStateCreateInfo inputAssemblyStateCreateInfo = {};
-                inputAssemblyStateCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-
-                // We intend to draw triangles
-                inputAssemblyStateCreateInfo.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-                inputAssemblyStateCreateInfo.primitiveRestartEnable = VK_FALSE;
-
-                VkPipelineViewportStateCreateInfo viewportStateCreateInfo = {};
-                viewportStateCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-
-                // We do not need to specify the actual viewport/scissor rectangles, we'll do that at drawing time
-                viewportStateCreateInfo.viewportCount = 1;
-                viewportStateCreateInfo.scissorCount = 1;
-
-                VkPipelineRasterizationStateCreateInfo rasterizationStateCreateInfo = {};
-                rasterizationStateCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-
-                // Using any mode other than VK_POLYGON_MODE_FILL would require enabling a corresponding GPU feature so just use it as the default 
-                rasterizationStateCreateInfo.polygonMode = VK_POLYGON_MODE_FILL;
-
-                rasterizationStateCreateInfo.lineWidth = 1.f;
-                
-                rasterizationStateCreateInfo.cullMode = VK_CULL_MODE_BACK_BIT;
-                rasterizationStateCreateInfo.frontFace = VK_FRONT_FACE_CLOCKWISE;
-
-                // Just disable multisampling
-                VkPipelineMultisampleStateCreateInfo multisampleStateCreateInfo = {};
-                multisampleStateCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-
-                multisampleStateCreateInfo.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-                multisampleStateCreateInfo.minSampleShading = 1.f;
-
-                VkPipelineColorBlendAttachmentState colorBlendAttachmentState = {};
-                colorBlendAttachmentState.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-                colorBlendAttachmentState.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
-                colorBlendAttachmentState.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
-                colorBlendAttachmentState.colorBlendOp = VK_BLEND_OP_ADD;
-                colorBlendAttachmentState.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-                colorBlendAttachmentState.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-                colorBlendAttachmentState.alphaBlendOp = VK_BLEND_OP_ADD;
-
-                VkPipelineColorBlendStateCreateInfo colorBlendStateCreateInfo = {};
-                colorBlendStateCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-                colorBlendStateCreateInfo.logicOp = VK_LOGIC_OP_COPY;
-                colorBlendStateCreateInfo.attachmentCount = 1;
-                colorBlendStateCreateInfo.pAttachments = &colorBlendAttachmentState;
-
-                VkPipelineDynamicStateCreateInfo dynamicStateCreateInfo = {};
-                dynamicStateCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-
-                // We need to enable dynamic states for the stuff we want to use dynamically
-                std::array<VkDynamicState, 2> dynamicStates = {
-                    {
-                        VK_DYNAMIC_STATE_VIEWPORT,
-                        VK_DYNAMIC_STATE_SCISSOR,
-                    }
-                };
-                dynamicStateCreateInfo.dynamicStateCount = static_cast<std::uint32_t>(dynamicStates.size());
-                dynamicStateCreateInfo.pDynamicStates = dynamicStates.data();
-
-                VkPipelineLayoutCreateInfo layoutCreateInfo = {};
-                layoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-
-                if (vkCreatePipelineLayout(this->vulkanDevice, &layoutCreateInfo, nullptr, &this->vulkanPipelineLayout) != VK_SUCCESS)
-                    throw std::runtime_error("Failed to create pipeline layout");
-
-                VkGraphicsPipelineCreateInfo graphicsPipelineCreateInfo = {};
-                graphicsPipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-
-                graphicsPipelineCreateInfo.stageCount = 2;
-                graphicsPipelineCreateInfo.pStages = shaderStages.data();
-
-                // Fixed-function stage description
-                graphicsPipelineCreateInfo.pVertexInputState = &vertexInputStateCreateInfo;
-                graphicsPipelineCreateInfo.pInputAssemblyState = &inputAssemblyStateCreateInfo;
-                graphicsPipelineCreateInfo.pViewportState = &viewportStateCreateInfo;
-                graphicsPipelineCreateInfo.pRasterizationState = &rasterizationStateCreateInfo;
-                graphicsPipelineCreateInfo.pMultisampleState = &multisampleStateCreateInfo;
-                graphicsPipelineCreateInfo.pColorBlendState = &colorBlendStateCreateInfo;
-                graphicsPipelineCreateInfo.pDynamicState = &dynamicStateCreateInfo;
-                
-                graphicsPipelineCreateInfo.layout = this->vulkanPipelineLayout;
-
-                graphicsPipelineCreateInfo.renderPass = this->vulkanRenderPass;
-                graphicsPipelineCreateInfo.subpass = 0;
-
-                // We don't want to derive from any base pipeline
-                graphicsPipelineCreateInfo.basePipelineIndex = -1;
-
-                if (vkCreateGraphicsPipelines(this->vulkanDevice, VK_NULL_HANDLE, 1, &graphicsPipelineCreateInfo, nullptr, &this->vulkanGraphicsPipeline) != VK_SUCCESS)
-                    throw std::runtime_error("Failed to create graphics pipeline");
-                
-                vkDestroyShaderModule(this->vulkanDevice, fragShaderModule, nullptr);
-                vkDestroyShaderModule(this->vulkanDevice, vertShaderModule, nullptr);
-            }
-
-            // Create framebuffers
-            {
-                this->vulkanSwapChainFramebuffers.resize(this->vulkanSwapChainImageViews.size());
-
-                for (std::size_t i = 0; i < this->vulkanSwapChainImageViews.size(); ++i) {
-                    VkFramebufferCreateInfo framebufferCreateInfo = {};
-                    framebufferCreateInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-
-                    framebufferCreateInfo.renderPass = this->vulkanRenderPass;
-                    framebufferCreateInfo.attachmentCount = 1;
-                    framebufferCreateInfo.pAttachments = &this->vulkanSwapChainImageViews[i];
-                    framebufferCreateInfo.width = this->vulkanSwapChainExtent.width;
-                    framebufferCreateInfo.height = this->vulkanSwapChainExtent.height;
-                    framebufferCreateInfo.layers = 1;
-
-                    if (vkCreateFramebuffer(this->vulkanDevice, &framebufferCreateInfo, nullptr, &this->vulkanSwapChainFramebuffers[i]) != VK_SUCCESS)
-                        throw std::runtime_error("Failed to create framebuffer");
-                }
-            }
-
-            // Create command pool
-            {
-                VkCommandPoolCreateInfo commandPoolCreateInfo = {};
-                commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-
-                // We're recording a command buffer every frame, so we want to be able to reset and rerecord over it
-                commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-
-                commandPoolCreateInfo.queueFamilyIndex = this->findVulkanQueueFamilies(this->vulkanPhysicalDevice).graphicsFamily.value();
-
-                if (vkCreateCommandPool(this->vulkanDevice, &commandPoolCreateInfo, nullptr, &this->vulkanCommandPool) != VK_SUCCESS)
-                    throw std::runtime_error("Failed to create command pool");
-            }
-
-            // Create command buffers
-            {
-                VkCommandBufferAllocateInfo allocateInfo = {};
-                allocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-
-                allocateInfo.commandPool = this->vulkanCommandPool;
-                allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; // We're not going to use the secondary command buffer functionality
-                allocateInfo.commandBufferCount = this->vulkanCommandBuffers.size();
-
-                if (vkAllocateCommandBuffers(this->vulkanDevice, &allocateInfo, this->vulkanCommandBuffers.data()) != VK_SUCCESS)
-                    throw std::runtime_error("Failed to create command buffer");
-            }
-
-            // Create sync objects
-            {
-                VkSemaphoreCreateInfo semaphoreCreateInfo = {};
-                semaphoreCreateInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-
-                VkFenceCreateInfo fenceCreateInfo = {};
-                fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-                fenceCreateInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT; // The fence is already in the signalled state so that we don't need special handling in drawFrame and can just wait on it even on the first frame
-
-                for (std::size_t i = 0; i < this->maxFramesInFlight; ++i)
-                    if (vkCreateSemaphore(this->vulkanDevice, &semaphoreCreateInfo, nullptr, &this->vulkanImageAvailableSemaphores.at(i)) != VK_SUCCESS ||
-                        vkCreateSemaphore(this->vulkanDevice, &semaphoreCreateInfo, nullptr, &this->vulkanRenderFinishedSemaphores.at(i)) != VK_SUCCESS ||
-                        vkCreateFence(this->vulkanDevice, &fenceCreateInfo, nullptr, &this->vulkanInFlightFences.at(i)) != VK_SUCCESS)
-                        throw std::runtime_error("Failed to create semaphores and fence");
-            }
+            if (vkCreateImageView(this->vulkanDevice, &createInfo, nullptr, &this->vulkanSwapChainImageViews.at(i)) != VK_SUCCESS)
+                throw std::runtime_error("Failed to create one of the image views");
         }
+    }
+
+    void initializeRenderPass()
+    {
+        VkAttachmentDescription colorAttachmentDescription = {};
+        colorAttachmentDescription.format = this->vulkanSwapChainImageFormat;
+        colorAttachmentDescription.samples = VK_SAMPLE_COUNT_1_BIT;
+
+        colorAttachmentDescription.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        colorAttachmentDescription.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+        colorAttachmentDescription.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        colorAttachmentDescription.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+
+        colorAttachmentDescription.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        colorAttachmentDescription.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+        VkAttachmentReference colorAttachmentReference = {};
+        colorAttachmentReference.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkSubpassDescription subpassDescription = {};
+        subpassDescription.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+
+        subpassDescription.colorAttachmentCount = 1;
+        subpassDescription.pColorAttachments = &colorAttachmentReference;
+
+        VkRenderPassCreateInfo renderPassCreateInfo = {};
+        renderPassCreateInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        renderPassCreateInfo.attachmentCount = 1;
+        renderPassCreateInfo.pAttachments = &colorAttachmentDescription;
+        renderPassCreateInfo.subpassCount = 1;
+        renderPassCreateInfo.pSubpasses = &subpassDescription;
+
+        VkSubpassDependency subpassDependency = {};
+        subpassDependency.srcSubpass = VK_SUBPASS_EXTERNAL; // The implicit subpass before the render pass
+        subpassDependency.dstSubpass = 0; // Our pass, the first and only one
+        subpassDependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; // We need to wait for the swap chain to finish reading from the image before we can access it
+        subpassDependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; // Prevent the transition from happening until it's actually necessary (and allowed)
+        subpassDependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+        renderPassCreateInfo.dependencyCount = 1;
+        renderPassCreateInfo.pDependencies = &subpassDependency;
+
+        if (vkCreateRenderPass(this->vulkanDevice, &renderPassCreateInfo, nullptr, &this->vulkanRenderPass) != VK_SUCCESS)
+            throw std::runtime_error("Failed to create render pass");
+    }
+
+    void initializeGraphicsPipeline()
+    {
+        auto vertShaderCode = readFullFile("./shaders/vert.spv");
+        auto fragShaderCode = readFullFile("./shaders/frag.spv");
+
+        auto vertShaderModule = this->createVulkanShaderModuleFromCode(vertShaderCode);
+        auto fragShaderModule = this->createVulkanShaderModuleFromCode(fragShaderCode);
+
+        VkPipelineShaderStageCreateInfo vertShaderStageCreateInfo = {};
+        vertShaderStageCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+
+        vertShaderStageCreateInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+
+        vertShaderStageCreateInfo.module = vertShaderModule;
+        vertShaderStageCreateInfo.pName = "main";
+
+        VkPipelineShaderStageCreateInfo fragShaderStageCreateInfo = {};
+        fragShaderStageCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+
+        fragShaderStageCreateInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        fragShaderStageCreateInfo.module = fragShaderModule;
+        fragShaderStageCreateInfo.pName = "main";
+
+        std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages = {
+            {
+                vertShaderStageCreateInfo,
+                fragShaderStageCreateInfo,
+            }
+        };
+
+        VkPipelineVertexInputStateCreateInfo vertexInputStateCreateInfo = {};
+        vertexInputStateCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+        VkPipelineInputAssemblyStateCreateInfo inputAssemblyStateCreateInfo = {};
+        inputAssemblyStateCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+
+        // We intend to draw triangles
+        inputAssemblyStateCreateInfo.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        inputAssemblyStateCreateInfo.primitiveRestartEnable = VK_FALSE;
+
+        VkPipelineViewportStateCreateInfo viewportStateCreateInfo = {};
+        viewportStateCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+
+        // We do not need to specify the actual viewport/scissor rectangles, we'll do that at drawing time
+        viewportStateCreateInfo.viewportCount = 1;
+        viewportStateCreateInfo.scissorCount = 1;
+
+        VkPipelineRasterizationStateCreateInfo rasterizationStateCreateInfo = {};
+        rasterizationStateCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+
+        // Using any mode other than VK_POLYGON_MODE_FILL would require enabling a corresponding GPU feature so just use it as the default 
+               rasterizationStateCreateInfo.polygonMode = VK_POLYGON_MODE_FILL;
+
+        rasterizationStateCreateInfo.lineWidth = 1.f;
+                
+        rasterizationStateCreateInfo.cullMode = VK_CULL_MODE_BACK_BIT;
+        rasterizationStateCreateInfo.frontFace = VK_FRONT_FACE_CLOCKWISE;
+
+        // Just disable multisampling
+        VkPipelineMultisampleStateCreateInfo multisampleStateCreateInfo = {};
+        multisampleStateCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+
+        multisampleStateCreateInfo.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        multisampleStateCreateInfo.minSampleShading = 1.f;
+
+        VkPipelineColorBlendAttachmentState colorBlendAttachmentState = {};
+        colorBlendAttachmentState.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        colorBlendAttachmentState.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        colorBlendAttachmentState.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+        colorBlendAttachmentState.colorBlendOp = VK_BLEND_OP_ADD;
+        colorBlendAttachmentState.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        colorBlendAttachmentState.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        colorBlendAttachmentState.alphaBlendOp = VK_BLEND_OP_ADD;
+
+        VkPipelineColorBlendStateCreateInfo colorBlendStateCreateInfo = {};
+        colorBlendStateCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        colorBlendStateCreateInfo.logicOp = VK_LOGIC_OP_COPY;
+        colorBlendStateCreateInfo.attachmentCount = 1;
+        colorBlendStateCreateInfo.pAttachments = &colorBlendAttachmentState;
+
+        VkPipelineDynamicStateCreateInfo dynamicStateCreateInfo = {};
+        dynamicStateCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+
+        // We need to enable dynamic states for the stuff we want to use dynamically
+        std::array<VkDynamicState, 2> dynamicStates = {
+            {
+                VK_DYNAMIC_STATE_VIEWPORT,
+                VK_DYNAMIC_STATE_SCISSOR,
+            }
+        };
+        dynamicStateCreateInfo.dynamicStateCount = static_cast<std::uint32_t>(dynamicStates.size());
+        dynamicStateCreateInfo.pDynamicStates = dynamicStates.data();
+
+        VkPipelineLayoutCreateInfo layoutCreateInfo = {};
+        layoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+
+        if (vkCreatePipelineLayout(this->vulkanDevice, &layoutCreateInfo, nullptr, &this->vulkanPipelineLayout) != VK_SUCCESS)
+            throw std::runtime_error("Failed to create pipeline layout");
+
+        VkGraphicsPipelineCreateInfo graphicsPipelineCreateInfo = {};
+        graphicsPipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+
+        graphicsPipelineCreateInfo.stageCount = 2;
+        graphicsPipelineCreateInfo.pStages = shaderStages.data();
+
+        // Fixed-function stage description
+        graphicsPipelineCreateInfo.pVertexInputState = &vertexInputStateCreateInfo;
+        graphicsPipelineCreateInfo.pInputAssemblyState = &inputAssemblyStateCreateInfo;
+        graphicsPipelineCreateInfo.pViewportState = &viewportStateCreateInfo;
+        graphicsPipelineCreateInfo.pRasterizationState = &rasterizationStateCreateInfo;
+        graphicsPipelineCreateInfo.pMultisampleState = &multisampleStateCreateInfo;
+        graphicsPipelineCreateInfo.pColorBlendState = &colorBlendStateCreateInfo;
+        graphicsPipelineCreateInfo.pDynamicState = &dynamicStateCreateInfo;
+                
+        graphicsPipelineCreateInfo.layout = this->vulkanPipelineLayout;
+
+        graphicsPipelineCreateInfo.renderPass = this->vulkanRenderPass;
+        graphicsPipelineCreateInfo.subpass = 0;
+
+        // We don't want to derive from any base pipeline
+        graphicsPipelineCreateInfo.basePipelineIndex = -1;
+
+        if (vkCreateGraphicsPipelines(this->vulkanDevice, VK_NULL_HANDLE, 1, &graphicsPipelineCreateInfo, nullptr, &this->vulkanGraphicsPipeline) != VK_SUCCESS)
+            throw std::runtime_error("Failed to create graphics pipeline");
+                
+        vkDestroyShaderModule(this->vulkanDevice, fragShaderModule, nullptr);
+        vkDestroyShaderModule(this->vulkanDevice, vertShaderModule, nullptr);
+    }
+
+    void initializeFramebuffers()
+    {
+        this->vulkanSwapChainFramebuffers.resize(this->vulkanSwapChainImageViews.size());
+
+        for (std::size_t i = 0; i < this->vulkanSwapChainImageViews.size(); ++i) {
+            VkFramebufferCreateInfo framebufferCreateInfo = {};
+            framebufferCreateInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+
+            framebufferCreateInfo.renderPass = this->vulkanRenderPass;
+            framebufferCreateInfo.attachmentCount = 1;
+            framebufferCreateInfo.pAttachments = &this->vulkanSwapChainImageViews[i];
+            framebufferCreateInfo.width = this->vulkanSwapChainExtent.width;
+            framebufferCreateInfo.height = this->vulkanSwapChainExtent.height;
+            framebufferCreateInfo.layers = 1;
+
+            if (vkCreateFramebuffer(this->vulkanDevice, &framebufferCreateInfo, nullptr, &this->vulkanSwapChainFramebuffers[i]) != VK_SUCCESS)
+                throw std::runtime_error("Failed to create framebuffer");
+        }
+    }
+
+    void initializeCommandPool()
+    {
+        VkCommandPoolCreateInfo commandPoolCreateInfo = {};
+        commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+
+        // We're recording a command buffer every frame, so we want to be able to reset and rerecord over it
+        commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+
+        commandPoolCreateInfo.queueFamilyIndex = this->findVulkanQueueFamilies(this->vulkanPhysicalDevice).graphicsFamily.value();
+
+        if (vkCreateCommandPool(this->vulkanDevice, &commandPoolCreateInfo, nullptr, &this->vulkanCommandPool) != VK_SUCCESS)
+            throw std::runtime_error("Failed to create command pool");
+    }
+
+    void initializeCommandBuffers()
+    {
+        VkCommandBufferAllocateInfo allocateInfo = {};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+
+        allocateInfo.commandPool = this->vulkanCommandPool;
+        allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; // We're not going to use the secondary command buffer functionality
+        allocateInfo.commandBufferCount = this->vulkanCommandBuffers.size();
+
+        if (vkAllocateCommandBuffers(this->vulkanDevice, &allocateInfo, this->vulkanCommandBuffers.data()) != VK_SUCCESS)
+            throw std::runtime_error("Failed to create command buffer");
+    }
+
+    void initializeSyncObjects()
+    {
+        VkSemaphoreCreateInfo semaphoreCreateInfo = {};
+        semaphoreCreateInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+        VkFenceCreateInfo fenceCreateInfo = {};
+        fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fenceCreateInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT; // The fence is already in the signalled state so that we don't need special handling in drawFrame and can just wait on it even on the first frame
+
+        for (std::size_t i = 0; i < this->maxFramesInFlight; ++i)
+            if (vkCreateSemaphore(this->vulkanDevice, &semaphoreCreateInfo, nullptr, &this->vulkanImageAvailableSemaphores.at(i)) != VK_SUCCESS ||
+                vkCreateSemaphore(this->vulkanDevice, &semaphoreCreateInfo, nullptr, &this->vulkanRenderFinishedSemaphores.at(i)) != VK_SUCCESS ||
+                vkCreateFence(this->vulkanDevice, &fenceCreateInfo, nullptr, &this->vulkanInFlightFences.at(i)) != VK_SUCCESS)
+                throw std::runtime_error("Failed to create semaphores and fence");
     }
 
     ~vulkanSomethingOnTheScreenApp()
@@ -588,19 +616,13 @@ public:
         }
         
         vkDestroyCommandPool(this->vulkanDevice, this->vulkanCommandPool, nullptr);
-        
-        for (auto swapChainFramebuffer : this->vulkanSwapChainFramebuffers)
-            vkDestroyFramebuffer(this->vulkanDevice, swapChainFramebuffer, nullptr);
+
+        this->destroySwapChain();
         
         vkDestroyPipeline(this->vulkanDevice, this->vulkanGraphicsPipeline, nullptr);
         vkDestroyPipelineLayout(this->vulkanDevice, this->vulkanPipelineLayout, nullptr);
 
         vkDestroyRenderPass(this->vulkanDevice, this->vulkanRenderPass, nullptr);
-        
-        for (auto vulkanSwapChainImageView : this->vulkanSwapChainImageViews)
-            vkDestroyImageView(this->vulkanDevice, vulkanSwapChainImageView, nullptr);
-        
-        vkDestroySwapchainKHR(this->vulkanDevice, this->vulkanSwapChain, nullptr);
 
         vkDestroyDevice(this->vulkanDevice, nullptr);
 
@@ -612,6 +634,17 @@ public:
 
         glfwDestroyWindow(this->glfwWindow);
         glfwTerminate();
+    }
+
+    void destroySwapChain()
+    {
+        for (auto swapChainFramebuffer : this->vulkanSwapChainFramebuffers)
+            vkDestroyFramebuffer(this->vulkanDevice, swapChainFramebuffer, nullptr);
+        
+        for (auto vulkanSwapChainImageView : this->vulkanSwapChainImageViews)
+            vkDestroyImageView(this->vulkanDevice, vulkanSwapChainImageView, nullptr);
+        
+        vkDestroySwapchainKHR(this->vulkanDevice, this->vulkanSwapChain, nullptr);
     }
 
     bool areVulkanValidationLayersSupported()
@@ -907,10 +940,23 @@ public:
     void drawFrame()
     {
         vkWaitForFences(this->vulkanDevice, 1, &this->vulkanInFlightFences.at(this->currentFrame), VK_TRUE, UINT64_MAX);
-        vkResetFences(this->vulkanDevice, 1, &this->vulkanInFlightFences.at(this->currentFrame)); // We need to manually reset the fence back to the unsignalled state
 
         std::uint32_t imageIndex;
-        vkAcquireNextImageKHR(this->vulkanDevice, this->vulkanSwapChain, UINT64_MAX, this->vulkanImageAvailableSemaphores.at(this->currentFrame), VK_NULL_HANDLE, &imageIndex);
+        VkResult vkAcquireNextImageKHRResult = vkAcquireNextImageKHR(this->vulkanDevice, this->vulkanSwapChain, UINT64_MAX, this->vulkanImageAvailableSemaphores.at(this->currentFrame), VK_NULL_HANDLE, &imageIndex);
+
+        // Automatic swap chain recreation when necessary, both through checking the return value of vkAcquireNextImageKHR and the GLFW callback
+        // (Note: This is required for supporting resizing in any way as VK_ERROR_OUT_OF_DATE_KHR means the swap chain cannot be used for rendering anymore) 
+        // The framebufferResized check can't be moved out of here for "optimization" as doing it here ensures the semaphores are in a consistent state
+        if (vkAcquireNextImageKHRResult == VK_ERROR_OUT_OF_DATE_KHR || vkAcquireNextImageKHRResult == VK_SUBOPTIMAL_KHR || this->framebufferResized) {
+            this->framebufferResized = false;
+            this->reinitializeSwapChain();
+            return;
+        } else if (vkAcquireNextImageKHRResult != VK_SUCCESS)
+            throw std::runtime_error("Failed to acquire swap chain image");
+
+        // We need to manually reset the fence back to the unsignalled state
+        // We only do so if we're submitting work as otherwise it could result in a deadlock
+        vkResetFences(this->vulkanDevice, 1, &this->vulkanInFlightFences.at(this->currentFrame));
  
         vkResetCommandBuffer(this->vulkanCommandBuffers.at(this->currentFrame), 0);
 
@@ -947,6 +993,28 @@ public:
 
         // Advance to the next frame every time, and loop around once maxFramesInFlight has been reached
         this->currentFrame = (this->currentFrame + 1) % this->maxFramesInFlight;
+    }
+
+    void reinitializeSwapChain()
+    {
+        // Needed to minimize resource usage upon minimization
+        int width = 0, height = 0;
+        glfwGetFramebufferSize(this->glfwWindow, &width, &height);
+        while (width == 0 || height == 0) {
+            glfwWaitEvents();
+            glfwGetFramebufferSize(this->glfwWindow, &width, &height);
+        }
+        
+        // The approach taken here is suboptimal since we stop all rendering before creating the new swap chain, but it's simpler than trying to handle the drawing of commands from the old swap chain
+        
+        // Avoid touching resources that are still in use
+        vkDeviceWaitIdle(this->vulkanDevice);
+
+        this->destroySwapChain();
+        
+        this->initializeSwapChain();
+        this->initializeSwapChainImageViews();
+        this->initializeFramebuffers();
     }
 };
 
