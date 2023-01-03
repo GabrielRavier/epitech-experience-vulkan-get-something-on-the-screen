@@ -1,2 +1,4 @@
 # Files produced by us
 /vulkan-test
+/shaders/frag.spv
+/shaders/vert.spv
