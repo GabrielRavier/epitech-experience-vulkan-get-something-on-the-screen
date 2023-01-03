@@ -44,6 +44,7 @@ static void internalVkDestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebug
 }
 
 class vulkanSomethingOnTheScreenApp {
+    static constexpr std::uint32_t maxFramesInFlight = 2; // We don't want the CPU to get *too* far ahead of the GPU (putting 3 or more frames in flight might add a significant amount of latency...)
     static constexpr std::uint32_t windowWidth = 800;
     static constexpr std::uint32_t windowHeight = 600;
     static constexpr const char *name = "Get something on the screen with Vulkan";
@@ -87,11 +88,13 @@ class vulkanSomethingOnTheScreenApp {
     std::vector<VkFramebuffer> vulkanSwapChainFramebuffers;
 
     VkCommandPool vulkanCommandPool;
-    VkCommandBuffer vulkanCommandBuffer;
+    std::array<VkCommandBuffer, vulkanSomethingOnTheScreenApp::maxFramesInFlight> vulkanCommandBuffers;
 
-    VkSemaphore vulkanImageAvailableSemaphore;
-    VkSemaphore vulkanRenderFinishedSemaphore;
-    VkFence vulkanInFlightFence;
+    std::array<VkSemaphore, vulkanSomethingOnTheScreenApp::maxFramesInFlight> vulkanImageAvailableSemaphores;
+    std::array<VkSemaphore, vulkanSomethingOnTheScreenApp::maxFramesInFlight> vulkanRenderFinishedSemaphores;
+    std::array<VkFence, vulkanSomethingOnTheScreenApp::maxFramesInFlight> vulkanInFlightFences;
+
+    std::uint32_t currentFrame = 0;
     
 public:
     vulkanSomethingOnTheScreenApp()
@@ -545,16 +548,16 @@ public:
                     throw std::runtime_error("Failed to create command pool");
             }
 
-            // Create command buffer
+            // Create command buffers
             {
                 VkCommandBufferAllocateInfo allocateInfo = {};
                 allocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
 
                 allocateInfo.commandPool = this->vulkanCommandPool;
                 allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; // We're not going to use the secondary command buffer functionality
-                allocateInfo.commandBufferCount = 1;
+                allocateInfo.commandBufferCount = this->vulkanCommandBuffers.size();
 
-                if (vkAllocateCommandBuffers(this->vulkanDevice, &allocateInfo, &this->vulkanCommandBuffer) != VK_SUCCESS)
+                if (vkAllocateCommandBuffers(this->vulkanDevice, &allocateInfo, this->vulkanCommandBuffers.data()) != VK_SUCCESS)
                     throw std::runtime_error("Failed to create command buffer");
             }
 
@@ -567,19 +570,22 @@ public:
                 fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
                 fenceCreateInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT; // The fence is already in the signalled state so that we don't need special handling in drawFrame and can just wait on it even on the first frame
 
-                if (vkCreateSemaphore(this->vulkanDevice, &semaphoreCreateInfo, nullptr, &this->vulkanImageAvailableSemaphore) != VK_SUCCESS ||
-                    vkCreateSemaphore(this->vulkanDevice, &semaphoreCreateInfo, nullptr, &this->vulkanRenderFinishedSemaphore) != VK_SUCCESS ||
-                    vkCreateFence(this->vulkanDevice, &fenceCreateInfo, nullptr, &this->vulkanInFlightFence) != VK_SUCCESS)
-                    throw std::runtime_error("Failed to create semaphores and fence");
+                for (std::size_t i = 0; i < this->maxFramesInFlight; ++i)
+                    if (vkCreateSemaphore(this->vulkanDevice, &semaphoreCreateInfo, nullptr, &this->vulkanImageAvailableSemaphores.at(i)) != VK_SUCCESS ||
+                        vkCreateSemaphore(this->vulkanDevice, &semaphoreCreateInfo, nullptr, &this->vulkanRenderFinishedSemaphores.at(i)) != VK_SUCCESS ||
+                        vkCreateFence(this->vulkanDevice, &fenceCreateInfo, nullptr, &this->vulkanInFlightFences.at(i)) != VK_SUCCESS)
+                        throw std::runtime_error("Failed to create semaphores and fence");
             }
         }
     }
 
     ~vulkanSomethingOnTheScreenApp()
     {
-        vkDestroyFence(this->vulkanDevice, this->vulkanInFlightFence, nullptr);
-        vkDestroySemaphore(this->vulkanDevice, this->vulkanRenderFinishedSemaphore, nullptr);
-        vkDestroySemaphore(this->vulkanDevice, this->vulkanImageAvailableSemaphore, nullptr);
+        for (std::size_t i = 0; i < this->maxFramesInFlight; ++i) {
+            vkDestroyFence(this->vulkanDevice, this->vulkanInFlightFences.at(i), nullptr);
+            vkDestroySemaphore(this->vulkanDevice, this->vulkanRenderFinishedSemaphores.at(i), nullptr);
+            vkDestroySemaphore(this->vulkanDevice, this->vulkanImageAvailableSemaphores.at(i), nullptr);
+        }
         
         vkDestroyCommandPool(this->vulkanDevice, this->vulkanCommandPool, nullptr);
         
@@ -900,44 +906,47 @@ public:
 
     void drawFrame()
     {
-        vkWaitForFences(this->vulkanDevice, 1, &this->vulkanInFlightFence, VK_TRUE, UINT64_MAX);
-        vkResetFences(this->vulkanDevice, 1, &this->vulkanInFlightFence); // We need to manually reset the fence back to the unsignalled state
+        vkWaitForFences(this->vulkanDevice, 1, &this->vulkanInFlightFences.at(this->currentFrame), VK_TRUE, UINT64_MAX);
+        vkResetFences(this->vulkanDevice, 1, &this->vulkanInFlightFences.at(this->currentFrame)); // We need to manually reset the fence back to the unsignalled state
 
         std::uint32_t imageIndex;
-        vkAcquireNextImageKHR(this->vulkanDevice, this->vulkanSwapChain, UINT64_MAX, this->vulkanImageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+        vkAcquireNextImageKHR(this->vulkanDevice, this->vulkanSwapChain, UINT64_MAX, this->vulkanImageAvailableSemaphores.at(this->currentFrame), VK_NULL_HANDLE, &imageIndex);
  
-        vkResetCommandBuffer(this->vulkanCommandBuffer, 0);
+        vkResetCommandBuffer(this->vulkanCommandBuffers.at(this->currentFrame), 0);
 
-        this->recordVulkanCommandBuffer(this->vulkanCommandBuffer, imageIndex);
+        this->recordVulkanCommandBuffer(this->vulkanCommandBuffers.at(this->currentFrame), imageIndex);
 
         VkSubmitInfo submitInfo = {};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 
         VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; // We want the execution to wait until writing colors to the image is available
         submitInfo.waitSemaphoreCount = 1;
-        submitInfo.pWaitSemaphores = &this->vulkanImageAvailableSemaphore;
+        submitInfo.pWaitSemaphores = &this->vulkanImageAvailableSemaphores.at(this->currentFrame);
         submitInfo.pWaitDstStageMask = &waitStage;
 
         submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &this->vulkanCommandBuffer;
+        submitInfo.pCommandBuffers = &this->vulkanCommandBuffers.at(this->currentFrame);
 
         submitInfo.signalSemaphoreCount = 1;
-        submitInfo.pSignalSemaphores = &this->vulkanRenderFinishedSemaphore;
+        submitInfo.pSignalSemaphores = &this->vulkanRenderFinishedSemaphores.at(this->currentFrame);
 
-        if (vkQueueSubmit(this->vulkanGraphicsQueue, 1, &submitInfo, this->vulkanInFlightFence) != VK_SUCCESS)
+        if (vkQueueSubmit(this->vulkanGraphicsQueue, 1, &submitInfo, this->vulkanInFlightFences.at(this->currentFrame)) != VK_SUCCESS)
             throw std::runtime_error("Failed to submit draw command buffer");
 
         VkPresentInfoKHR presentInfoKHR = {};
         presentInfoKHR.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
 
         presentInfoKHR.waitSemaphoreCount = 1;
-        presentInfoKHR.pWaitSemaphores = &this->vulkanRenderFinishedSemaphore;
+        presentInfoKHR.pWaitSemaphores = &this->vulkanRenderFinishedSemaphores.at(this->currentFrame);
 
         presentInfoKHR.swapchainCount = 1;
         presentInfoKHR.pSwapchains = &this->vulkanSwapChain;
         presentInfoKHR.pImageIndices = &imageIndex;
 
         vkQueuePresentKHR(this->vulkanPresentQueue, &presentInfoKHR);
+
+        // Advance to the next frame every time, and loop around once maxFramesInFlight has been reached
+        this->currentFrame = (this->currentFrame + 1) % this->maxFramesInFlight;
     }
 };
 
